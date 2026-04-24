@@ -17,7 +17,6 @@ venv/
 *.swo
 
 # Output files
-input/*.ulg
 output/*.png
 output/*.yaml
 

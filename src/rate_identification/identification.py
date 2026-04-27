@@ -266,10 +266,45 @@ def residuals_first_order(
     return y - y_hat
 
 
+def residuals_first_order_phase(
+    params: np.ndarray, u: np.ndarray, y: np.ndarray, dt: float
+) -> np.ndarray:
+    """Compute phase-based residuals for fitting (minimizes phase error only).
+
+    Uses FFT to compute phase spectrum and minimizes phase difference,
+    ignoring magnitude errors. This improves phase matching at the cost
+    of magnitude accuracy.
+    """
+    T = params[0]
+    y_hat = simulate_first_order_integral(u, T, dt, y_init=y[0])
+
+    # Compute FFT of both signals
+    n = min(len(u), len(y))
+    fft_y = np.fft.rfft(y[:n])
+    fft_y_hat = np.fft.rfft(y_hat[:n])
+
+    # Get phases
+    phase_y = np.angle(fft_y)
+    phase_y_hat = np.angle(fft_y_hat)
+
+    # Compute phase error (using complex exponential to handle wrapping)
+    phase_diff = phase_y - phase_y_hat
+    phase_error = np.imag(np.exp(1j * phase_diff))  # sin(phase_diff)
+
+    # Weight by magnitude (focus on frequencies with signal)
+    mag_y = np.abs(fft_y)
+    weights = mag_y / (np.sum(mag_y) + 1e-12)
+
+    # Weighted phase error
+    weighted_phase_error = weights * phase_error
+
+    return weighted_phase_error
+
+
 def fit_first_order(
     u: np.ndarray, y: np.ndarray, dt: float
-) -> tuple[float | None, np.ndarray | None, float]:
-    """Fit continuous first-order model H(s) = 1 / (T*s + 1).
+) -> tuple[float | None, float | None, np.ndarray | None, float]:
+    """Fit continuous first-order model H(s) = K / (s + pole).
 
     Args:
         u: Input signal
@@ -312,6 +347,103 @@ def fit_first_order(
 
     except Exception:
         return None, None, -1.0
+
+
+def fit_first_order_phase(
+    u: np.ndarray, y: np.ndarray, dt: float
+) -> tuple[float | None, np.ndarray | None, float]:
+    """Fit first-order model using phase-based loss function.
+
+    Minimizes phase error instead of magnitude error, which improves
+    phase matching at the cost of magnitude accuracy.
+
+    H(s) = 1 / (T*s + 1)
+
+    Args:
+        u: Input signal
+        y: Measured output
+        dt: Sample time [s]
+
+    Returns:
+        (T, y_hat, fit_pct) or (None, None, -1.0) if failed
+    """
+    u = np.asarray(u, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+
+    # Initial guess: T ~ 0.1s (typical time constant)
+    T0 = 0.1
+
+    x0 = np.array([T0])
+
+    # Bounds: T > 0.001, T < 10
+    lower = np.array([0.001])
+    upper = np.array([10.0])
+
+    try:
+        result = least_squares(
+            residuals_first_order_phase,
+            x0,
+            args=(u, y, dt),
+            bounds=(lower, upper),
+            method="trf",
+            max_nfev=200,
+        )
+
+        if not result.success:
+            return None, None, -1.0
+
+        T = result.x[0]
+        y_hat = simulate_first_order_integral(u, T, dt, y_init=y[0])
+        fit = fit_percent(y, y_hat)
+
+        return T, y_hat, fit
+
+    except Exception:
+        return None, None, -1.0
+
+
+def fit_magnitude_phase_percent(
+    y: np.ndarray, y_hat: np.ndarray
+) -> tuple[float, float]:
+    """Calculate separate magnitude and phase fit percentages.
+
+    Args:
+        y: Measured output
+        y_hat: Simulated output
+
+    Returns:
+        (magnitude_fit_pct, phase_fit_pct)
+    """
+    # Compute FFT
+    n = min(len(y), len(y_hat))
+    fft_y = np.fft.rfft(y[:n])
+    fft_y_hat = np.fft.rfft(y_hat[:n])
+
+    # Magnitude spectra
+    mag_y = np.abs(fft_y)
+    mag_y_hat = np.abs(fft_y_hat)
+
+    # Phase spectra
+    phase_y = np.angle(fft_y)
+    phase_y_hat = np.angle(fft_y_hat)
+
+    # Magnitude fit: 1 - |||y| - |y_hat||| / ||y||
+    mag_error = np.linalg.norm(mag_y - mag_y_hat)
+    mag_norm = np.linalg.norm(mag_y)
+    magnitude_fit = max(0.0, 100.0 * (1.0 - mag_error / mag_norm))
+
+    # Phase fit: 1 - ||sin(phase_y - phase_y_hat)|| / ||sin(phase_y)||
+    # Use sin(phase_diff) to handle 2pi wrapping
+    phase_diff = phase_y - phase_y_hat
+    sin_phase_error = np.abs(np.sin(phase_diff))
+    phase_norm = np.linalg.norm(sin_phase_error)
+    phase_total = np.linalg.norm(np.sin(phase_y))
+    if phase_total < 1e-12:
+        phase_fit = 100.0
+    else:
+        phase_fit = max(0.0, 100.0 * (1.0 - phase_norm / phase_total))
+
+    return magnitude_fit, phase_fit
 
 
 def estimate_delay_cross_correlation(
@@ -613,6 +745,58 @@ def residuals_first_order_with_delay(
     return y[valid_start:] - y_hat[valid_start:]
 
 
+def residuals_first_order_with_delay_phase(
+    params: np.ndarray,
+    u: np.ndarray,
+    y: np.ndarray,
+    dt: float,
+    delay_samples: int,
+) -> np.ndarray:
+    """Compute phase-based residuals for first-order fitting with delay.
+
+    Minimizes phase error instead of magnitude error.
+
+    Args:
+        params: [T] - time constant
+        u: Input signal
+        y: Measured output
+        dt: Sample time [s]
+        delay_samples: Delay in samples (integer)
+
+    Returns:
+        Phase error (valid portion only, excluding delay transient)
+    """
+    T = params[0]
+    tau = delay_samples * dt
+
+    y_hat = simulate_first_order_with_delay(u, T, tau, dt, y_init=y[0])
+
+    # Exclude transient period
+    valid_start = min(delay_samples + 5, len(y))
+    y_valid = y[valid_start:]
+    y_hat_valid = y_hat[valid_start:]
+
+    # Compute FFT of both signals
+    n = len(y_valid)
+    fft_y = np.fft.rfft(y_valid)
+    fft_y_hat = np.fft.rfft(y_hat_valid)
+
+    # Get phases
+    phase_y = np.angle(fft_y)
+    phase_y_hat = np.angle(fft_y_hat)
+
+    # Compute phase error (using complex exponential to handle wrapping)
+    phase_diff = phase_y - phase_y_hat
+    phase_error = np.imag(np.exp(1j * phase_diff))  # sin(phase_diff)
+
+    # Weight by magnitude (focus on frequencies with signal)
+    mag_y = np.abs(fft_y)
+    weights = mag_y / (np.sum(mag_y) + 1e-12)
+
+    # Weighted phase error
+    return weights * phase_error
+
+
 def fit_first_order_with_delay(
     u: np.ndarray,
     y: np.ndarray,
@@ -620,6 +804,7 @@ def fit_first_order_with_delay(
     max_delay_samples: int = 30,
     loss: str = "linear",
     f_scale: float = 1.0,
+    use_phase_loss: bool = False,
 ) -> tuple[float | None, float | None, int | None, np.ndarray | None, float]:
     """Fit first-order model with delay: H(s) = exp(-tau*s) / (T*s + 1).
 
@@ -634,6 +819,7 @@ def fit_first_order_with_delay(
         max_delay_samples: Maximum delay to search [samples]
         loss: Loss function ('linear', 'huber', 'cauchy', 'soft_l1', 'arctan')
         f_scale: Soft margin between inlier and outlier residuals
+        use_phase_loss: If True, use phase-based loss function
 
     Returns:
         (T, tau, delay_samples, y_hat, fit_pct) or (None,...) if failed
@@ -660,16 +846,21 @@ def fit_first_order_with_delay(
     lower = np.array([0.001])
     upper = np.array([10.0])
 
+    # Choose residuals function based on phase_loss flag
+    residuals_fn = (
+        residuals_first_order_with_delay_phase
+        if use_phase_loss
+        else residuals_first_order_with_delay
+    )
+
     for delay_samples in search_delays:
         try:
             result = least_squares(
-                lambda p: residuals_first_order_with_delay(p, u, y, dt, int(delay_samples)),
+                lambda p: residuals_fn(p, u, y, dt, int(delay_samples)),
                 x0,
                 bounds=(lower, upper),
                 method="trf",
                 max_nfev=200,
-                loss=loss,
-                f_scale=f_scale,
             )
 
             if not result.success:
@@ -705,6 +896,7 @@ def identify_axis(
     robust_loss: str = "linear",
     f_scale: float | None = None,
     model_order: int = 2,
+    use_phase_loss: bool = False,
 ) -> FitResult | None:
     """Identify continuous dynamics with delay for one axis.
 
@@ -720,6 +912,7 @@ def identify_axis(
         robust_loss: Robust loss function ('linear', 'huber', 'cauchy', 'soft_l1', 'arctan')
         f_scale: Soft margin for robust loss (None = auto-detect from signal std)
         model_order: Model order (1 or 2, default: 2)
+        use_phase_loss: Use phase-based loss function for better phase matching
 
     Returns:
         FitResult or None if identification failed
@@ -737,6 +930,7 @@ def identify_axis(
             max_delay_samples=max_delay_samples,
             loss=robust_loss,
             f_scale=f_scale if f_scale is not None else 1.0,
+            use_phase_loss=use_phase_loss,
         )
 
         if result[0] is None:

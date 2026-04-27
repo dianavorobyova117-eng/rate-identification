@@ -16,7 +16,7 @@ from .data import (
     get_thrust_acceleration_setpoint_data,
     get_accel_z_data,
 )
-from .identification import identify_axis
+from .identification import identify_axis, fit_magnitude_phase_percent
 from .plots import (
     plot_data_filtering,
     plot_final_result,
@@ -109,6 +109,12 @@ def find_dominant_frequencies(
     help="Soft margin for robust loss in rad/s (default: auto-detect)",
 )
 @click.option(
+    "--phase-loss",
+    is_flag=True,
+    default=False,
+    help="Use phase-based loss function (optimizes phase matching instead of magnitude)",
+)
+@click.option(
     "--output-dir",
     type=click.Path(),
     default="output",
@@ -129,6 +135,7 @@ def main(
     max_delay: int,
     robust_loss: str,
     f_scale: float | None,
+    phase_loss: bool,
     output_dir: str,
     bandwidth_hz: float,
 ):
@@ -285,6 +292,7 @@ def main(
             robust_loss=robust_loss,
             f_scale=f_scale,
             model_order=int(model_order),
+            use_phase_loss=phase_loss,
         )
 
         if result is None:
@@ -292,6 +300,12 @@ def main(
             continue
 
         print(f"  Fit: {result.fit_pct:.1f}%")
+
+        # Calculate and display separate magnitude/phase fit
+        mag_fit, phase_fit = fit_magnitude_phase_percent(y, result.y_hat)
+        print(f"  Magnitude fit: {mag_fit:.1f}%")
+        print(f"  Phase fit: {phase_fit:.1f}%")
+
         print(f"  Delay: {result.delay_samples} samples ({result.tau:.3f} s)")
 
         if result.model_order == 1:
@@ -307,6 +321,8 @@ def main(
 
         print(f"  Stable: {result.stable}")
         print(f"  Loss function: {result.loss_function}")
+        if phase_loss:
+            print(f"  Phase-only loss: True (optimizes phase matching)")
         if result.loss_function != "linear" and f_scale is not None:
             print(f"  f_scale: {f_scale:.3f} rad/s")
         print(f"  Transfer function: {result.transfer_function}")

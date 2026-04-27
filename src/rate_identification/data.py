@@ -85,3 +85,31 @@ def extract_segment_data(
     data_resampled = np.interp(ts_target, ts, data)
 
     return ts_target, data_resampled
+
+
+def get_thrust_acceleration_setpoint_data(ulog: pyulog.ULog) -> tuple[np.ndarray, np.ndarray] | None:
+    """获取推力加速度设定点数据.
+
+    Returns:
+        (timestamp, thrust_axis_acc_sp) 或 None
+    """
+    for d in ulog.data_list:
+        if d.name == "vehicle_acc_rates_setpoint":
+            ts = d.data["timestamp"].astype(float) / 1e6
+            thrust_sp = d.data["thrust_axis_acc_sp"].astype(float)
+            return (ts, thrust_sp)
+    return None
+
+
+def get_accel_z_data(ulog: pyulog.ULog) -> tuple[np.ndarray, np.ndarray] | None:
+    """获取Z轴加速度测量数据.
+
+    Returns:
+        (timestamp, accel_z) 或 None
+    """
+    for d in ulog.data_list:
+        if d.name == "vehicle_acceleration":
+            ts = d.data["timestamp"].astype(float) / 1e6
+            accel_z = d.data["xyz[2]"].astype(float)
+            return (ts, accel_z)
+    return None

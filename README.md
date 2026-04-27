@@ -1,12 +1,18 @@
 # Rate Identification Tool
 
-自动从PX4 ULog文件中辨识roll和pitch的rate dynamics。
+自动从PX4 ULog文件中辨识系统动力学。
 
 ## 功能
 
 - 自动检测offboard模式时长
-- 使用vehicle_acc_rates_setpoint作为输入，vehicle_angular_velocity作为输出
-- 同时辨识roll和pitch两个轴
+- **两种辨识模式**：
+  - `rate`: 角速率环（roll/pitch轴）
+  - `accel`: 推力加速度环（Z轴加速度）
+- **两种模型阶数**：
+  - 一阶模型：`H(s) = e^(-τ*s) * K / (s + pole)`
+  - 二阶模型：`H(s) = e^(-τ*s) * ωₙ² / (s² + 2ζωₙs + ωₙ²)`
+- **时延估计**：互相关粗估计 + 网格搜索精细优化
+- **鲁棒拟合**：支持huber/cauchy等损失函数处理异常值
 - 生成传递函数表达式和丰富的可视化结果
 
 ## 快速开始
@@ -28,22 +34,41 @@ cd rate-identification
 # 一行命令处理所有ulg文件
 ./run.sh
 
-# 或处理单个文件
+# 处理单个文件（二阶模型，角速率模式）
 uv run scripts/identify.py input/your_file.ulg
+
+# 推力加速度环辨识（推荐一阶模型）
+uv run scripts/identify.py input/your_file.ulg --mode accel --model-order 1
 
 # 指定辨识时长（秒）
 uv run scripts/identify.py input/your_file.ulg --duration 3.0
 
 # 只辨识特定轴
 uv run scripts/identify.py input/your_file.ulg --axes pitch
+
+# 使用鲁棒损失函数处理异常值
+uv run scripts/identify.py input/your_file.ulg --mode accel --model-order 1 --robust-loss huber
 ```
+
+## 参数说明
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `--duration` | 辨识时长（秒） | 2.5 |
+| `--mode` | 辨识模式：rate（角速率）或accel（加速度） | rate |
+| `--model-order` | 模型阶数：1或2 | 2 |
+| `--axes` | 辨识轴：roll/pitch/both | both |
+| `--max-delay` | 最大时延搜索范围（采样点） | 30 |
+| `--robust-loss` | 鲁棒损失：linear/huber/cauchy/soft_l1/arctan | linear |
+| `--f-scale` | 鲁棒损失的软边界（rad/s或m/s²） | 自动检测 |
 
 ## 输出
 
 每个ulg文件生成：
 - `{filename}_data_filtering.png` - 归一化输入输出数据
-- `{filename}_fit.png` - 时域拟合对比（多阶模型）
+- `{filename}_fit.png` - 时域拟合对比
 - `{filename}_bode.png` - 频域分析（波特图）
+- `{filename}_final.png` - 最终结果（输入、测量、拟合）
 - `{filename}_params.yaml` - 辨识参数和传递函数
 
 ## 目录结构
@@ -59,14 +84,41 @@ rate-identification/
 
 ## 示例结果
 
+### 角速率环（二阶模型）
 ```
 ROLL:
   Fit: 80.5%
   Delay: 1 sample
-  H(z) = z^-1 * (0.351z^-1 + 0.293z^-2) / (1 - 0.458z^-1 + 0.057z^-2)
-
-PITCH:
-  Fit: 82.5%
-  Delay: 0 samples
-  H(z) = (-0.178 + 0.633z^-1) / (1 - 0.734z^-1 + 0.219z^-2)
+  Model: Second order
+  omega_n: 45.2 rad/s (7.2 Hz)
+  zeta: 0.65
+  H(s) = exp(-0.020s) * 2043.0 / (s^2 + 58.8s + 2043.0)
 ```
+
+### 推力加速度环（一阶模型）
+```
+ACCEL:
+  Fit: 81.4%
+  Delay: 7 samples (0.140 s)
+  Model: First order
+  Gain K: 9.868
+  Pole: 17.626 rad/s
+  H(s) = exp(-0.140s) * 9.868 / (s + 17.626)
+```
+
+## 算法说明
+
+### 时延估计
+采用两阶段方法：
+1. **粗估计**：计算输入输出的互相关函数，找到最大相关对应的滞后
+2. **精细搜索**：在粗估计±3采样点范围内网格搜索
+3. **联合优化**：对每个时延值优化连续参数，选择残差最小的组合
+
+### 模型选择
+- **角速率环**：推荐二阶模型，典型频率5-30Hz
+- **加速度环**：推荐一阶模型，典型频率2-5Hz
+
+### 鲁棒拟合
+当数据存在异常扰动时，使用鲁棒损失函数：
+- `huber`：中等异常值，推荐默认
+- `cauchy`：严重异常值，强抑制

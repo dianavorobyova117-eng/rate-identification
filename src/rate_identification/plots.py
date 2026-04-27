@@ -72,7 +72,16 @@ def plot_fit(
             label=f"fitted (fit={fit_pct:.1f}%)",
         )
 
-        ax.set_title(f"{ulg_name} - {axis_name.upper()} fit\n{tf_str}")
+        # Build title with delay and loss info
+        title = f"{ulg_name} - {axis_name.upper()} fit\n{tf_str}"
+        if "delay_samples" in data and "tau" in data:
+            tau = data["tau"]
+            delay_samples = data["delay_samples"]
+            title += f"\nDelay: {delay_samples} samples ({tau:.3f} s)"
+        if "loss_function" in data and data["loss_function"] != "linear":
+            title += f" | Robust loss: {data['loss_function']}"
+
+        ax.set_title(title)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Rate (rad/s)")
         ax.grid(True, alpha=0.3)
@@ -116,7 +125,16 @@ def plot_final_result(
             label=f"fitted (fit={fit_pct:.1f}%)",
         )
 
-        ax.set_title(f"{ulg_name} - {axis_name.upper()} final result\n{tf_str}")
+        # Build title with delay and loss info
+        title = f"{ulg_name} - {axis_name.upper()} final result\n{tf_str}"
+        if "delay_samples" in data and "tau" in data:
+            tau = data["tau"]
+            delay_samples = data["delay_samples"]
+            title += f"\nDelay: {delay_samples} samples ({tau:.3f} s)"
+        if "loss_function" in data and data["loss_function"] != "linear":
+            title += f" | Robust loss: {data['loss_function']}"
+
+        ax.set_title(title)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Rate (rad/s)")
         ax.grid(True, alpha=0.3)

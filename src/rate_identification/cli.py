@@ -13,6 +13,8 @@ from .data import (
     find_offboard_segment,
     get_acc_rates_data,
     get_angular_velocity_data,
+    get_thrust_acceleration_setpoint_data,
+    get_accel_z_data,
 )
 from .identification import identify_axis
 from .plots import (
@@ -74,7 +76,37 @@ def find_dominant_frequencies(
     "--axes",
     type=click.Choice(["roll", "pitch", "both"]),
     default="both",
-    help="Axes to identify (default: both)",
+    help="Axes to identify (default: both, only for rate mode)",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["rate", "accel"]),
+    default="rate",
+    help="Identification mode: rate (angular velocity) or accel (thrust acceleration)",
+)
+@click.option(
+    "--model-order",
+    type=click.Choice(["1", "2"]),
+    default="2",
+    help="Model order: 1 (first order) or 2 (second order, default)",
+)
+@click.option(
+    "--max-delay",
+    type=int,
+    default=30,
+    help="Maximum delay to search in samples (default: 30, ~0.6s at 50Hz)",
+)
+@click.option(
+    "--robust-loss",
+    type=click.Choice(["linear", "huber", "cauchy", "soft_l1", "arctan"]),
+    default="linear",
+    help="Robust loss function for outlier rejection (default: linear)",
+)
+@click.option(
+    "--f-scale",
+    type=float,
+    default=None,
+    help="Soft margin for robust loss in rad/s (default: auto-detect)",
 )
 @click.option(
     "--output-dir",
@@ -92,12 +124,33 @@ def main(
     ulg_file: str,
     duration: float,
     axes: str,
+    mode: str,
+    model_order: str,
+    max_delay: int,
+    robust_loss: str,
+    f_scale: float | None,
     output_dir: str,
     bandwidth_hz: float,
 ):
-    """Identify PX4 rate dynamics from ULog file.
+    """Identify PX4 dynamics from ULog file.
 
-    Uses continuous second-order model: H(s) = (b0 + b1*s) / (s^2 + a1*s + a2)
+    Models:
+        First order: H(s) = exp(-tau*s) * K / (s + pole)
+        Second order: H(s) = exp(-tau*s) * omega_n^2 / (s^2 + 2*zeta*omega_n*s + omega_n^2)
+
+    Modes:
+        rate: Angular velocity response (roll/pitch axes)
+        accel: Thrust acceleration response (Z-axis acceleration)
+
+    Examples:
+        # Standard rate identification (second order)
+        identify input.ulg
+
+        # Acceleration mode with first order model
+        identify input.ulg --mode accel --model-order 1
+
+        # With robust loss
+        identify input.ulg --mode accel --model-order 1 --robust-loss huber
     """
     ulg_path = Path(ulg_file)
     output_path = Path(output_dir)
@@ -128,24 +181,6 @@ def main(
     ident_duration = min(duration, offboard_duration)
     print(f"  Identification duration: {ident_duration:.3f} s\n")
 
-    # Get data
-    acc_rates = get_acc_rates_data(ulog)
-    ang_vel = get_angular_velocity_data(ulog)
-
-    if acc_rates is None or ang_vel is None:
-        print("Error: Required topics not found")
-        sys.exit(1)
-
-    ts_acc, roll_sp, pitch_sp = acc_rates
-    ts_ang, roll_meas, pitch_meas = ang_vel
-
-    # Determine axes to process
-    axes_to_process = []
-    if axes in ["roll", "both"]:
-        axes_to_process.append("roll")
-    if axes in ["pitch", "both"]:
-        axes_to_process.append("pitch")
-
     # Store plot data
     plot_data = {
         "ts": {},
@@ -154,21 +189,80 @@ def main(
     }
     results = {}
 
+    if mode == "rate":
+        # Get rate data
+        acc_rates = get_acc_rates_data(ulog)
+        ang_vel = get_angular_velocity_data(ulog)
+
+        if acc_rates is None or ang_vel is None:
+            print("Error: Required topics not found")
+            sys.exit(1)
+
+        ts_acc, roll_sp, pitch_sp = acc_rates
+        ts_ang, roll_meas, pitch_meas = ang_vel
+
+        # Determine axes to process
+        axes_to_process = []
+        if axes in ["roll", "both"]:
+            axes_to_process.append("roll")
+        if axes in ["pitch", "both"]:
+            axes_to_process.append("pitch")
+
+        input_unit = "rad/s"
+        output_unit = "rad/s"
+
+    else:  # mode == "accel"
+        # Get acceleration data
+        thrust_sp = get_thrust_acceleration_setpoint_data(ulog)
+        accel_z = get_accel_z_data(ulog)
+
+        if thrust_sp is None or accel_z is None:
+            print("Error: Required topics not found")
+            sys.exit(1)
+
+        ts_acc, thrust_acc_sp = thrust_sp
+        ts_accel, accel_z_meas = accel_z
+
+        # For accel mode, process single axis
+        axes_to_process = ["accel"]
+
+        # Store data for processing
+        roll_sp = thrust_acc_sp
+        roll_meas = accel_z_meas
+        pitch_sp = None
+        pitch_meas = None
+
+        ts_acc_for_roll = ts_acc
+        ts_ang_for_roll = ts_accel
+
+        input_unit = "m/s²"
+        output_unit = "m/s²"
+
     # Process each axis
     for axis in axes_to_process:
         print(f"[{axis.upper()}]")
 
-        # Select data
-        if axis == "roll":
+        # Select data based on mode
+        if mode == "rate":
+            if axis == "roll":
+                u_raw = roll_sp
+                y_raw = roll_meas
+                ts_u_raw = ts_acc
+                ts_y_raw = ts_ang
+            else:
+                u_raw = pitch_sp
+                y_raw = pitch_meas
+                ts_u_raw = ts_acc
+                ts_y_raw = ts_ang
+        else:  # accel mode
             u_raw = roll_sp
             y_raw = roll_meas
-        else:
-            u_raw = pitch_sp
-            y_raw = pitch_meas
+            ts_u_raw = ts_acc_for_roll
+            ts_y_raw = ts_ang_for_roll
 
         # Extract offboard segment
-        ts_u, u = extract_segment_data(ts_acc, u_raw, offboard_start, ident_duration)
-        ts_y, y = extract_segment_data(ts_ang, y_raw, offboard_start, ident_duration)
+        ts_u, u = extract_segment_data(ts_u_raw, u_raw, offboard_start, ident_duration)
+        ts_y, y = extract_segment_data(ts_y_raw, y_raw, offboard_start, ident_duration)
 
         # Remove mean
         u = u - np.mean(u)
@@ -179,22 +273,42 @@ def main(
 
         print(f"  Data points: {len(u)}")
         print(f"  Sample time: {dt:.4f} s ({1.0 / dt:.1f} Hz)")
-        print(f"  Input std: {np.std(u):.4f} rad/s")
-        print(f"  Output std: {np.std(y):.4f} rad/s")
+        print(f"  Input std: {np.std(u):.4f} {input_unit}")
+        print(f"  Output std: {np.std(y):.4f} {output_unit}")
 
-        # Identify second-order model
-        result = identify_axis(u, y, dt)
+        # Identify model with delay
+        result = identify_axis(
+            u,
+            y,
+            dt,
+            max_delay_samples=max_delay,
+            robust_loss=robust_loss,
+            f_scale=f_scale,
+            model_order=int(model_order),
+        )
 
         if result is None:
             print(f"  Error: Identification failed")
             continue
 
         print(f"  Fit: {result.fit_pct:.1f}%")
-        print(
-            f"  omega_n: {result.omega_n:.2f} rad/s ({result.omega_n / (2 * np.pi):.2f} Hz)"
-        )
-        print(f"  zeta: {result.zeta:.4f}")
+        print(f"  Delay: {result.delay_samples} samples ({result.tau:.3f} s)")
+
+        if result.model_order == 1:
+            print(f"  Model: First order")
+            print(f"  Gain K: {result.gain:.3f}")
+            print(f"  Pole: {result.pole:.3f} rad/s")
+        else:
+            print(f"  Model: Second order")
+            print(
+                f"  omega_n: {result.omega_n:.2f} rad/s ({result.omega_n / (2 * np.pi):.2f} Hz)"
+            )
+            print(f"  zeta: {result.zeta:.4f}")
+
         print(f"  Stable: {result.stable}")
+        print(f"  Loss function: {result.loss_function}")
+        if result.loss_function != "linear" and f_scale is not None:
+            print(f"  f_scale: {f_scale:.3f} rad/s")
         print(f"  Transfer function: {result.transfer_function}")
 
         # FFT analysis
@@ -219,38 +333,47 @@ def main(
             "y_hat": result.y_hat,
             "fit_pct": result.fit_pct,
             "transfer_function": result.transfer_function,
+            "model_order": result.model_order,
+            "gain": result.gain,
+            "pole": result.pole,
             "omega_n": result.omega_n,
             "zeta": result.zeta,
+            "tau": result.tau,
+            "delay_samples": result.delay_samples,
             "poles": result.poles,
+            "loss_function": result.loss_function,
             "dominant_freqs": fft_result,
         }
 
     # Generate plots
     if results:
         stem = ulg_path.stem
+        # Add mode suffix to avoid overwriting files
+        mode_suffix = f"_{mode}" if mode == "accel" else ""
+        stem_with_mode = f"{stem}{mode_suffix}"
 
         # 1. Data filtering plot
         plot_data_filtering(
-            stem,
+            stem_with_mode,
             plot_data["ts"],
             plot_data["u"],
             plot_data["y"],
-            output_path / f"{stem}_data_filtering.png",
+            output_path / f"{stem_with_mode}_data_filtering.png",
         )
         print(f"  Data filtering plot saved")
 
         # 2. Fit plot
-        plot_fit(stem, results, output_path / f"{stem}_fit.png")
+        plot_fit(stem_with_mode, results, output_path / f"{stem_with_mode}_fit.png")
         print(f"  Fit plot saved")
 
         # 3. Frequency analysis plot
         plot_frequency_analysis(
-            stem, results, output_path / f"{stem}_bode.png", bandwidth_hz
+            stem_with_mode, results, output_path / f"{stem_with_mode}_bode.png", bandwidth_hz
         )
         print(f"  Frequency analysis plot saved")
 
         # 4. Final result plot
-        plot_final_result(stem, results, output_path / f"{stem}_final.png")
+        plot_final_result(stem_with_mode, results, output_path / f"{stem_with_mode}_final.png")
         print(f"  Final result plot saved\n")
 
         # Save parameters
@@ -259,20 +382,27 @@ def main(
             "offboard_start": float(offboard_start),
             "offboard_duration": float(offboard_duration),
             "identification_duration": float(ident_duration),
-            "model": "H(s) = omega_n^2 / (s^2 + 2*zeta*omega_n*s + omega_n^2)",
+            "mode": mode,
+            "model_order": int(model_order),
+            "identification_options": {
+                "max_delay_samples": max_delay,
+                "robust_loss": robust_loss,
+                "f_scale": f_scale if f_scale is not None else "auto",
+            },
             "axes": {},
         }
 
         for axis, data in results.items():
             freqs = data["dominant_freqs"]
-            params["axes"][axis] = {
+            axis_params = {
                 "sample_rate_hz": float(freqs["fs"]),
                 "transfer_function": data["transfer_function"],
                 "fit_percent": float(data["fit_pct"]),
-                "omega_n": float(data["omega_n"]),
-                "omega_n_hz": float(data["omega_n"] / (2 * np.pi)),
-                "zeta": float(data["zeta"]),
+                "model_order": data["model_order"],
+                "tau_seconds": float(data["tau"]),
+                "delay_samples": int(data["delay_samples"]),
                 "poles": [complex(p) for p in data["poles"]],
+                "loss_function": data["loss_function"],
                 "dominant_freqs_input": [
                     {"freq_hz": f, "magnitude": m} for f, m in freqs["input"]
                 ],
@@ -281,7 +411,24 @@ def main(
                 ],
             }
 
-        params_file = output_path / f"{stem}_params.yaml"
+            # Add model-specific parameters
+            if data["model_order"] == 1:
+                axis_params["gain"] = float(data["gain"])
+                axis_params["pole"] = float(data["pole"])
+            else:
+                axis_params["omega_n"] = float(data["omega_n"])
+                axis_params["omega_n_hz"] = float(data["omega_n"] / (2 * np.pi))
+                axis_params["zeta"] = float(data["zeta"])
+
+            params["axes"][axis] = axis_params
+
+        # Update model string based on order
+        if int(model_order) == 1:
+            params["model"] = "H(s) = exp(-tau*s) * K / (s + pole)"
+        else:
+            params["model"] = "H(s) = exp(-tau*s) * omega_n^2 / (s^2 + 2*zeta*omega_n*s + omega_n^2)"
+
+        params_file = output_path / f"{stem_with_mode}_params.yaml"
         with open(params_file, "w") as f:
             yaml.dump(params, f, default_flow_style=False, sort_keys=False)
 

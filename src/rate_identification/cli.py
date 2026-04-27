@@ -296,8 +296,8 @@ def main(
 
         if result.model_order == 1:
             print(f"  Model: First order")
-            print(f"  Gain K: {result.gain:.3f}")
-            print(f"  Pole: {result.pole:.3f} rad/s")
+            T = 1.0 / result.pole  # pole = 1/T
+            print(f"  Time constant T: {T:.3f} s")
         else:
             print(f"  Model: Second order")
             print(
@@ -413,8 +413,10 @@ def main(
 
             # Add model-specific parameters
             if data["model_order"] == 1:
-                axis_params["gain"] = float(data["gain"])
-                axis_params["pole"] = float(data["pole"])
+                T = 1.0 / data["pole"]  # pole = 1/T
+                axis_params["time_constant_T"] = float(T)
+                axis_params["pole"] = float(data["pole"])  # Keep pole for reference
+                axis_params["gain"] = 1.0  # Fixed gain
             else:
                 axis_params["omega_n"] = float(data["omega_n"])
                 axis_params["omega_n_hz"] = float(data["omega_n"] / (2 * np.pi))
@@ -424,7 +426,7 @@ def main(
 
         # Update model string based on order
         if int(model_order) == 1:
-            params["model"] = "H(s) = exp(-tau*s) * K / (s + pole)"
+            params["model"] = "H(s) = exp(-tau*s) / (T*s + 1)"
         else:
             params["model"] = "H(s) = exp(-tau*s) * omega_n^2 / (s^2 + 2*zeta*omega_n*s + omega_n^2)"
 

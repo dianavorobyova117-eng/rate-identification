@@ -202,33 +202,74 @@ def format_continuous_tf_with_delay(omega_n: float, zeta: float, tau: float) -> 
         return f"H(s) = exp(-{tau:.3f}s) * {term1} / (s^2 + {term2}s + {term3})"
 
 
-def format_first_order_tf(gain: float, pole: float) -> str:
-    """Format first-order transfer function string."""
-    return f"H(s) = {gain:.3f} / (s + {pole:.3f})"
+def format_first_order_tf(T: float) -> str:
+    """Format first-order transfer function string (standard form)."""
+    return f"H(s) = 1 / ({T:.3f}*s + 1)"
 
 
-def format_first_order_tf_with_delay(gain: float, pole: float, tau: float) -> str:
+def format_first_order_tf_with_delay(T: float, tau: float) -> str:
     """Format first-order transfer function string with delay using Pade approximation."""
     if tau < 0.001:
-        return f"H(s) = {gain:.3f} / (s + {pole:.3f})"
+        return f"H(s) = 1 / ({T:.3f}*s + 1)"
     else:
         # Show Pade approximation form
-        return f"H(s) ≈ (1 - {tau:.3f}s/2) / (1 + {tau:.3f}s/2) * {gain:.3f} / (s + {pole:.3f})"
+        return f"H(s) ≈ (1 - {tau:.3f}s/2) / (1 + {tau:.3f}s/2) * 1 / ({T:.3f}*s + 1)"
+
+
+def simulate_first_order_integral(
+    u: np.ndarray, T: float, dt: float, y_init: float = 0.0
+) -> np.ndarray:
+    """Simulate continuous first-order integral system via ZOH discretization.
+
+    H(s) = 1 / (T*s + 1)
+
+    Args:
+        u: Input signal
+        T: Time constant [s]
+        dt: Sample time [s]
+        y_init: Initial output value
+
+    Returns:
+        Simulated output y_hat
+    """
+    # Continuous transfer function: 1 / (T*s + 1) = 1 / (T*s + 1)
+    num_s = [1.0]
+    den_s = [T, 1.0]
+
+    # Discretize using ZOH
+    num_z, den_z, _ = signal.cont2discrete((num_s, den_s), dt, method="zoh")
+
+    # Simulate discrete system
+    num_z = num_z.flatten()
+    den_z = den_z.flatten()
+
+    y_hat = np.zeros(len(u), dtype=float)
+    order = len(den_z) - 1
+
+    # Set initial conditions
+    y_hat[:order] = y_init
+
+    # IIR filter simulation
+    for k in range(order, len(u)):
+        y_hat[k] = -sum(den_z[i + 1] * y_hat[k - 1 - i] for i in range(order))
+        y_hat[k] += sum(num_z[i] * u[k - i] for i in range(min(len(num_z), k + 1)))
+
+    return y_hat
 
 
 def residuals_first_order(
     params: np.ndarray, u: np.ndarray, y: np.ndarray, dt: float
 ) -> np.ndarray:
     """Compute residuals for first-order least-squares fitting."""
-    gain, pole = params
-    y_hat = simulate_first_order(u, gain, pole, dt, y_init=y[0])
+    T = params[0]
+    y_hat = simulate_first_order_integral(u, T, dt, y_init=y[0])
     return y - y_hat
 
 
 def fit_first_order(
     u: np.ndarray, y: np.ndarray, dt: float
-) -> tuple[float | None, float | None, np.ndarray | None, float]:
-    """Fit continuous first-order model H(s) = K / (s + pole).
+) -> tuple[float | None, np.ndarray | None, float]:
+    """Fit continuous first-order model H(s) = 1 / (T*s + 1).
 
     Args:
         u: Input signal
@@ -236,20 +277,19 @@ def fit_first_order(
         dt: Sample time [s]
 
     Returns:
-        (gain, pole, y_hat, fit_pct) or (None, None, None, -1.0) if failed
+        (T, y_hat, fit_pct) or (None, None, -1.0) if failed
     """
     u = np.asarray(u, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
 
-    # Initial guess: gain ~ std(y)/std(u), pole ~ 5 rad/s
-    gain0 = np.std(y) / (np.std(u) + 1e-12)
-    pole0 = 5.0
+    # Initial guess: T ~ 0.1s (typical time constant)
+    T0 = 0.1
 
-    x0 = np.array([gain0, pole0])
+    x0 = np.array([T0])
 
-    # Bounds: gain > 0, pole > 0
-    lower = np.array([0.01, 0.1])
-    upper = np.array([10.0, 100.0])
+    # Bounds: T > 0.001, T < 10
+    lower = np.array([0.001])
+    upper = np.array([10.0])
 
     try:
         result = least_squares(
@@ -262,16 +302,16 @@ def fit_first_order(
         )
 
         if not result.success:
-            return None, None, None, -1.0
+            return None, None, -1.0
 
-        gain, pole = result.x
-        y_hat = simulate_first_order(u, gain, pole, dt, y_init=y[0])
+        T = result.x[0]
+        y_hat = simulate_first_order_integral(u, T, dt, y_init=y[0])
         fit = fit_percent(y, y_hat)
 
-        return gain, pole, y_hat, fit
+        return T, y_hat, fit
 
     except Exception:
-        return None, None, None, -1.0
+        return None, None, -1.0
 
 
 def estimate_delay_cross_correlation(
@@ -364,25 +404,23 @@ def simulate_second_order_with_delay(
 
 def simulate_first_order_with_delay(
     u: np.ndarray,
-    gain: float,
-    pole: float,
+    T: float,
     tau: float,
     dt: float,
     y_init: float = 0.0,
 ) -> np.ndarray:
     """Simulate continuous first-order system with delay using Pade approximation.
 
-    H(s) = exp(-tau*s) * K / (s + pole)
+    H(s) = exp(-tau*s) / (T*s + 1)
 
     Using first-order Pade approximation: exp(-tau*s) ≈ (1 - tau*s/2) / (1 + tau*s/2)
 
     Combined transfer function:
-    H(s) = K * (1 - tau*s/2) / [(s + pole) * (1 + tau*s/2)]
+    H(s) = (1 - tau*s/2) / [(T*s + 1) * (1 + tau*s/2)]
 
     Args:
         u: Input signal
-        gain: Gain K [-]
-        pole: Pole location [rad/s]
+        T: Time constant [s]
         tau: Time delay [s]
         dt: Sample time [s]
         y_init: Initial output value
@@ -392,22 +430,22 @@ def simulate_first_order_with_delay(
     """
     if tau < 0.001:
         # Negligible delay, use undelayed system
-        return simulate_first_order(u, gain, pole, dt, y_init)
+        return simulate_first_order_integral(u, T, dt, y_init)
 
     # First-order Pade approximation: exp(-tau*s) ≈ (1 - tau*s/2) / (1 + tau*s/2)
-    # H(s) = K * (1 - tau*s/2) / [(s + pole) * (1 + tau*s/2)]
+    # H(s) = (1 - tau*s/2) / [(T*s + 1) * (1 + tau*s/2)]
     #
-    # Expand denominator: (s + pole) * (1 + tau*s/2)
-    #                   = s + pole + tau*s²/2 + tau*pole*s/2
-    #                   = (tau/2)*s² + (1 + tau*pole/2)*s + pole
+    # Expand denominator: (T*s + 1) * (1 + tau*s/2)
+    #                   = T*s + 1 + T*tau*s²/2 + tau*s/2
+    #                   = (T*tau/2)*s² + (T + tau/2)*s + 1
     #
-    # Expand numerator: K * (1 - tau*s/2) = -K*tau/2 * s + K
+    # Expand numerator: 1 - tau*s/2
     #
     # Standard form: num_s = [a1, a0] for a1*s + a0
     #                 den_s = [b2, b1, b0] for b2*s² + b1*s + b0
 
-    num_s = [-gain * tau / 2, gain]
-    den_s = [tau / 2, 1 + tau * pole / 2, pole]
+    num_s = [-tau / 2, 1]
+    den_s = [T * tau / 2, T + tau / 2, 1]
 
     # Discretize using ZOH
     num_z, den_z, _ = signal.cont2discrete((num_s, den_s), dt, method="zoh")
@@ -555,7 +593,7 @@ def residuals_first_order_with_delay(
     """Compute residuals for first-order least-squares fitting with discrete delay.
 
     Args:
-        params: [gain, pole]
+        params: [T] - time constant
         u: Input signal
         y: Measured output
         dt: Sample time [s]
@@ -564,10 +602,10 @@ def residuals_first_order_with_delay(
     Returns:
         Residuals (valid portion only, excluding delay transient)
     """
-    gain, pole = params
+    T = params[0]
     tau = delay_samples * dt
 
-    y_hat = simulate_first_order_with_delay(u, gain, pole, tau, dt, y_init=y[0])
+    y_hat = simulate_first_order_with_delay(u, T, tau, dt, y_init=y[0])
 
     # Exclude transient period (delay + 5 samples for settling)
     valid_start = min(delay_samples + 5, len(y))
@@ -582,12 +620,12 @@ def fit_first_order_with_delay(
     max_delay_samples: int = 30,
     loss: str = "linear",
     f_scale: float = 1.0,
-) -> tuple[float | None, float | None, float | None, int | None, np.ndarray | None, float]:
-    """Fit first-order model with delay: H(s) = exp(-tau*s) * K / (s + pole).
+) -> tuple[float | None, float | None, int | None, np.ndarray | None, float]:
+    """Fit first-order model with delay: H(s) = exp(-tau*s) / (T*s + 1).
 
     Uses two-stage approach:
     1. Grid search over discrete delay values
-    2. Continuous optimization of (gain, pole) for each delay
+    2. Continuous optimization of T for each delay
 
     Args:
         u: Input signal
@@ -598,7 +636,7 @@ def fit_first_order_with_delay(
         f_scale: Soft margin between inlier and outlier residuals
 
     Returns:
-        (gain, pole, tau, delay_samples, y_hat, fit_pct) or (None,...) if failed
+        (T, tau, delay_samples, y_hat, fit_pct) or (None,...) if failed
     """
     u = np.asarray(u, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -615,13 +653,12 @@ def fit_first_order_with_delay(
     best_cost = np.inf
 
     # Initial guess for continuous parameters
-    gain0 = np.std(y) / (np.std(u) + 1e-12)
-    pole0 = 5.0
-    x0 = np.array([gain0, pole0])
+    T0 = 0.1  # Initial time constant [s]
+    x0 = np.array([T0])
 
-    # Bounds
-    lower = np.array([0.01, 0.1])
-    upper = np.array([10.0, 100.0])
+    # Bounds: T > 0.001, T < 10
+    lower = np.array([0.001])
+    upper = np.array([10.0])
 
     for delay_samples in search_delays:
         try:
@@ -643,19 +680,19 @@ def fit_first_order_with_delay(
 
             if cost < best_cost:
                 best_cost = cost
-                gain, pole = result.x
+                T = result.x[0]
                 tau = delay_samples * dt
                 y_hat = simulate_first_order_with_delay(
-                    u, gain, pole, tau, dt, y_init=y[0]
+                    u, T, tau, dt, y_init=y[0]
                 )
                 fit = fit_percent(y, y_hat)
-                best_result = (gain, pole, tau, int(delay_samples), y_hat, fit)
+                best_result = (T, tau, int(delay_samples), y_hat, fit)
 
         except Exception:
             continue
 
     if best_result is None:
-        return None, None, None, None, None, -1.0
+        return None, None, None, None, -1.0
 
     return best_result
 
@@ -672,7 +709,7 @@ def identify_axis(
     """Identify continuous dynamics with delay for one axis.
 
     Models:
-        - First order: H(s) = exp(-tau*s) * K / (s + pole)
+        - First order: H(s) = exp(-tau*s) / (T*s + 1)
         - Second order: H(s) = exp(-tau*s) * omega_n^2 / (s^2 + 2*zeta*omega_n*s + omega_n^2)
 
     Args:
@@ -705,19 +742,19 @@ def identify_axis(
         if result[0] is None:
             return None
 
-        gain, pole, tau, delay_samples, y_hat, fit = result
+        T, tau, delay_samples, y_hat, fit = result
 
-        # Check stability: pole > 0
-        stable = bool(pole > 0)
+        # Check stability: T > 0
+        stable = bool(T > 0)
 
-        # Continuous pole
-        poles = np.array([-pole])
+        # Continuous pole: s = -1/T
+        poles = np.array([-1.0 / T])
 
         return FitResult(
             omega_n=0.0,
             zeta=0.0,
-            gain=gain,
-            pole=pole,
+            gain=1.0,
+            pole=1.0 / T,
             tau=tau,
             delay_samples=delay_samples,
             y_hat=y_hat,
@@ -726,7 +763,7 @@ def identify_axis(
             fit_pct=fit,
             mse_val=mse(y, y_hat),
             dt=dt,
-            transfer_function=format_first_order_tf_with_delay(gain, pole, tau),
+            transfer_function=format_first_order_tf_with_delay(T, tau),
             model_order=1,
             loss_function=robust_loss,
         )

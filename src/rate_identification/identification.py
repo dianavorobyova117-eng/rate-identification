@@ -208,11 +208,12 @@ def format_first_order_tf(gain: float, pole: float) -> str:
 
 
 def format_first_order_tf_with_delay(gain: float, pole: float, tau: float) -> str:
-    """Format first-order transfer function string with delay."""
+    """Format first-order transfer function string with delay using Pade approximation."""
     if tau < 0.001:
         return f"H(s) = {gain:.3f} / (s + {pole:.3f})"
     else:
-        return f"H(s) = exp(-{tau:.3f}s) * {gain:.3f} / (s + {pole:.3f})"
+        # Show Pade approximation form
+        return f"H(s) ≈ (1 - {tau:.3f}s/2) / (1 + {tau:.3f}s/2) * {gain:.3f} / (s + {pole:.3f})"
 
 
 def residuals_first_order(
@@ -369,11 +370,14 @@ def simulate_first_order_with_delay(
     dt: float,
     y_init: float = 0.0,
 ) -> np.ndarray:
-    """Simulate continuous first-order system with delay via ZOH discretization.
+    """Simulate continuous first-order system with delay using Pade approximation.
 
     H(s) = exp(-tau*s) * K / (s + pole)
 
-    The delay is implemented as integer samples: delay_samples = round(tau / dt)
+    Using first-order Pade approximation: exp(-tau*s) ≈ (1 - tau*s/2) / (1 + tau*s/2)
+
+    Combined transfer function:
+    H(s) = K * (1 - tau*s/2) / [(s + pole) * (1 + tau*s/2)]
 
     Args:
         u: Input signal
@@ -386,19 +390,42 @@ def simulate_first_order_with_delay(
     Returns:
         Simulated output y_hat
     """
-    # Simulate undelayed system
-    y_undelayed = simulate_first_order(u, gain, pole, dt, y_init)
+    if tau < 0.001:
+        # Negligible delay, use undelayed system
+        return simulate_first_order(u, gain, pole, dt, y_init)
 
-    # Apply delay (integer samples)
-    delay_samples = int(round(tau / dt))
+    # First-order Pade approximation: exp(-tau*s) ≈ (1 - tau*s/2) / (1 + tau*s/2)
+    # H(s) = K * (1 - tau*s/2) / [(s + pole) * (1 + tau*s/2)]
+    #
+    # Expand denominator: (s + pole) * (1 + tau*s/2)
+    #                   = s + pole + tau*s²/2 + tau*pole*s/2
+    #                   = (tau/2)*s² + (1 + tau*pole/2)*s + pole
+    #
+    # Expand numerator: K * (1 - tau*s/2) = -K*tau/2 * s + K
+    #
+    # Standard form: num_s = [a1, a0] for a1*s + a0
+    #                 den_s = [b2, b1, b0] for b2*s² + b1*s + b0
 
-    # Shift output by delay_samples (fill beginning with y_init)
-    y_hat = np.full_like(u, y_init)
-    if delay_samples < len(u):
-        if delay_samples > 0:
-            y_hat[delay_samples:] = y_undelayed[:-delay_samples]
-        else:
-            y_hat = y_undelayed
+    num_s = [-gain * tau / 2, gain]
+    den_s = [tau / 2, 1 + tau * pole / 2, pole]
+
+    # Discretize using ZOH
+    num_z, den_z, _ = signal.cont2discrete((num_s, den_s), dt, method="zoh")
+
+    # Simulate discrete system
+    num_z = num_z.flatten()
+    den_z = den_z.flatten()
+
+    y_hat = np.zeros(len(u), dtype=float)
+    order = len(den_z) - 1
+
+    # Set initial conditions
+    y_hat[:order] = y_init
+
+    # IIR filter simulation
+    for k in range(order, len(u)):
+        y_hat[k] = -sum(den_z[i + 1] * y_hat[k - 1 - i] for i in range(order))
+        y_hat[k] += sum(num_z[i] * u[k - i] for i in range(min(len(num_z), k + 1)))
 
     return y_hat
 
